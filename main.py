@@ -53,7 +53,8 @@ async def run_cycle(cycle_num, start_time):
 
     try:
         # Using a shared async client with connection pooling for maximum network efficiency
-        async with httpx.AsyncClient(timeout=30.0, headers={'User-Agent': 'TrendAnalyzer/5.0'}) as client:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True,
+                                     headers={'User-Agent': 'TrendAnalyzer/5.0'}) as client:
             
             # 1. Ingest Data from all platforms CONCURRENTLY
             print(">>> 🚀 Launching all platform collectors simultaneously...")
@@ -78,7 +79,11 @@ async def run_cycle(cycle_num, start_time):
             for collector in collectors:
                 collector.recalculate_platform_stats()
 
-        # 4. Data Health Report
+            # 3.5 Top-K Retention Gatekeeper: Keep only the top 100 most intense trends
+            print(">>> ✂️ Pruning low-quality posts from database...")
+            db_manager.prune_database()     
+    
+       # 4. Data Health Report
         db_manager.get_db_stats()
 
         # 5. Final Output - Reporting Results in a formatted table
