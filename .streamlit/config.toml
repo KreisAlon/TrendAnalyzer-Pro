@@ -1,0 +1,16 @@
+# TrendScope theme. The accent is slate ink rather than Streamlit's default red,
+# so sliders, toggles, tabs and spinners match the dashboard's monochrome chrome
+# and never compete with the four platform colours in the charts.
+[theme]
+base = "light"
+primaryColor = "#0f172a"
+backgroundColor = "#f6f7fb"
+secondaryBackgroundColor = "#eef1f5"
+textColor = "#0f172a"
+font = "sans-serif"
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false

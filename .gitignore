@@ -11,6 +11,10 @@ env/
 *.db
 *.sqlite3
 
+# Per-run search plan written by DynamicTopicManager for the dashboard to read.
+# Generated output, and it changes every time the engine is retargeted.
+topic_profile.json
+
 # Mac OS specific
 .DS_Store
 

@@ -2,7 +2,17 @@ import httpx
 import asyncio
 from collectors.base import BaseCollector
 from collectors.github import clean_markdown
-from config import MAX_POSTS_PER_PLATFORM, TEXT_PREVIEW_LENGTH, MAX_CONCURRENT_DEVTO
+from config import (
+    MAX_POSTS_PER_PLATFORM, TEXT_PREVIEW_LENGTH, MAX_CONCURRENT_DEVTO,
+    DEFAULT_DEVTO_TAGS,
+)
+
+# Dev.to reports no match count, so each tag is fetched at the API's page maximum:
+# the length of the week's list IS the count. One request per tag either way, and
+# only the best MAX_POSTS_PER_PLATFORM are deep-fetched. A tag that fills the whole
+# page is reported as capped (the true count is at least this).
+DEVTO_COUNT_PAGE = 1000
+
 
 class DevToCollector(BaseCollector):
     """
@@ -14,9 +24,14 @@ class DevToCollector(BaseCollector):
     it implements concurrent fetching using asyncio.gather().
     """
 
-    # Dev.to's /articles endpoint filters on a single tag, so relevant AI content is
+    # Dev.to's /articles endpoint filters on a single tag, so relevant content is
     # spread across several tags. Each is fetched separately and merged.
-    TAGS = ["ai", "machinelearning", "llm"]
+    # Curated fallback only -- the live tags come from the run's TopicProfile.
+    TAGS = DEFAULT_DEVTO_TAGS
+
+    def tags(self):
+        """Dev.to tags for this run: the plan, or the curated fallback."""
+        return self.planned('devto_tags', self.TAGS)
 
     def __init__(self):
         super().__init__("Dev.to")
@@ -46,7 +61,9 @@ class DevToCollector(BaseCollector):
                 # the NLP stage sees prose rather than syntax.
                 body = data.get('body_markdown', '') or ''
                 if body:
-                    return clean_markdown(body)[:TEXT_PREVIEW_LENGTH]
+                    # Boundary-aware cut: a plain slice left the stored article ending
+                    # mid-word.
+                    return self.truncate_at_boundary(clean_markdown(body), TEXT_PREVIEW_LENGTH)
                 return data.get('description', '')
         except Exception as e:
             # Silent fail for individual requests to prevent breaking the entire batch
@@ -105,10 +122,17 @@ class DevToCollector(BaseCollector):
         """Main entry point for the collector. Orchestrates the concurrent fetching."""
         print(f"--- {self.platform_name}: Performing Concurrent Deep Fetch... ---")
         try:
-            per_tag = max(10, MAX_POSTS_PER_PLATFORM // len(self.TAGS))
+            tags = self.tags()
+            if not tags:
+                return []
             tag_results = await asyncio.gather(
-                *[self.fetch_tag(client, tag, per_tag) for tag in self.TAGS]
+                *[self.fetch_tag(client, tag, DEVTO_COUNT_PAGE) for tag in tags]
             )
+            for batch in tag_results:
+                self.search_totals.append(len(batch))
+                if len(batch) >= DEVTO_COUNT_PAGE:
+                    self.search_capped = True
+            self.record_candidates(tag_results, 'id')
 
             # Merge tags, deduplicating articles that carry more than one of them.
             unique_articles = {}
@@ -122,15 +146,11 @@ class DevToCollector(BaseCollector):
                 reverse=True
             )[:MAX_POSTS_PER_PLATFORM]
 
-            # Concurrency implementation: Create a list of async tasks for all articles
-            tasks = [self.process_article(client, art) for art in articles]
-
-            # Execute all tasks simultaneously. This reduces execution time from
-            # O(N) linear time to O(1) network latency time.
-            results = await asyncio.gather(*tasks)
-
-            # Filter out None values (articles that failed quality checks or network errors)
-            return [post for post in results if post is not None]
+            # Deep-fetch in concurrent waves and stop once the target is met, so the
+            # oversampled pool only costs requests when the gate is rejecting.
+            return await self.collect_until_target(
+                articles, lambda art: self.process_article(client, art)
+            )
 
         except Exception as e:
             print(f"Critical Error in Dev.to Collector orchestration: {e}")

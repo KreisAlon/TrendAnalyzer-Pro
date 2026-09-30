@@ -1,6 +1,7 @@
 keybert
 scikit-learn
 sentence-transformers
+google-generativeai
 beautifulsoup4
 langdetect
 altair==6.0.0

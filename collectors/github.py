@@ -6,9 +6,20 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from collectors.base import BaseCollector
 from config import (
-    MAX_POSTS_PER_PLATFORM, TEXT_PREVIEW_LENGTH,
-    MAX_CONCURRENT_GITHUB, GITHUB_RATE_LIMIT_FLOOR,
+    MAX_POSTS_PER_PLATFORM, TARGET_POSTS_PER_PLATFORM, TEXT_PREVIEW_LENGTH,
+    MAX_CONCURRENT_GITHUB, GITHUB_RATE_LIMIT_FLOOR, DEFAULT_GITHUB_TOPICS,
 )
+
+# GitHub's search endpoint caps per_page at 100; asking for more is silently clamped.
+GITHUB_MAX_PER_PAGE = 100
+
+# Star floors applied by topic rank. The leading topics are the ones most specific
+# to the target, so they can afford to demand popularity; the tail exists purely to
+# keep the candidate pool deep enough to absorb gatekeeper rejections, and a high
+# floor there would starve it.
+STAR_FLOOR_CORE = 200
+STAR_FLOOR_MID = 100
+STAR_FLOOR_WIDE = 50
 
 # README boilerplate that carries no semantic signal. Stripped before truncation --
 # otherwise the first 800 characters of a project like onnx are pure badge markup
@@ -53,23 +64,55 @@ def build_headers():
     return headers
 
 
+async def fetch_readme_raw(client, owner, repo, branch):
+    """
+    Fetches the README straight from raw.githubusercontent.com.
+
+    This is the primary path because the CDN is NOT metered against the core API quota.
+    That quota was the hidden limit behind short GitHub posts: unauthenticated clients
+    get 60 core requests/hour, so by the second cycle readme_budget was 0, every repo
+    was stored on its description alone (~110-260 characters) and the bodies the NLP
+    stage needs never arrived at all.
+
+    Only the two common casings are attempted -- a miss costs a 404 and falls through
+    to the metered API, which resolves any filename.
+    """
+    branch = branch or 'HEAD'
+    for name in ("README.md", "readme.md"):
+        url = f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{name}"
+        try:
+            response = await client.get(url, timeout=10.0)
+            if response.status_code == 200 and response.text.strip():
+                return BaseCollector.truncate_at_boundary(
+                    clean_markdown(response.text), TEXT_PREVIEW_LENGTH
+                )
+        except Exception:
+            continue
+    return ""
+
+
 async def fetch_readme(client, owner, repo):
     """
-    Fetches and decodes the README.md for a given repository.
-    Includes a timeout to prevent hanging on unresponsive servers or massive files.
+    Fetches and decodes the README via the metered core API.
+
+    Fallback for repositories whose README is not named README.md (README.rst, .txt,
+    docs/README.md), which the raw CDN path cannot guess.
     """
     url = f"https://api.github.com/repos/{owner}/{repo}/readme"
     try:
-        # Added a 5.0 second timeout for external safety
-        response = await client.get(url, headers=build_headers(), timeout=5.0)
+        # A 10s timeout: the previous 5s dropped the READMEs of large monorepos, which
+        # are exactly the repositories worth keeping. The body is the only text these
+        # posts have, so timing out here costs the whole post.
+        response = await client.get(url, headers=build_headers(), timeout=10.0)
 
         if response.status_code == 200:
             payload = response.json()
             if payload.get('encoding') != 'base64':
                 return ""
             raw = base64.b64decode(payload.get('content', '')).decode('utf-8', errors='ignore')
-            # Strip boilerplate FIRST, then truncate, so the budget is spent on prose
-            return clean_markdown(raw)[:TEXT_PREVIEW_LENGTH]
+            # Strip boilerplate FIRST, then truncate, so the budget is spent on prose --
+            # and cut on a sentence boundary rather than mid-word.
+            return BaseCollector.truncate_at_boundary(clean_markdown(raw), TEXT_PREVIEW_LENGTH)
     except Exception:
         return ""
     return ""
@@ -83,13 +126,26 @@ class GitHubCollector(BaseCollector):
         super().__init__("GitHub")
         self.base_url = "https://api.github.com/search/repositories"
         self.semaphore = asyncio.Semaphore(MAX_CONCURRENT_GITHUB)
-        # How many READMEs this cycle may fetch. Unauthenticated clients get 60 core
-        # requests/hour in total, so an uncapped cycle drains the entire quota in one
-        # pass; repos beyond the cap are ingested on their description alone.
+        # How many READMEs this cycle may fall back to the METERED core API for.
+        # Unauthenticated clients get 60 core requests/hour in total, so an uncapped
+        # cycle drains the whole quota in one pass. README.md itself now arrives over
+        # the unmetered CDN, so this budget only bounds the odd-filename fallback.
         self.readme_budget = 0
         # Repo descriptions are short but hand-written and topic-filtered, so they are
         # worth keeping even without a README body.
         self.min_content_chars = 100
+
+    def topics(self):
+        """
+        The topic slugs to fan out over: the run's plan, or the curated fallback.
+
+        Read through the profile rather than a class constant so a run can be
+        retargeted in memory. The planner's slugs are validated against GitHub's
+        slug grammar in topics.py before they reach this point, because a phrase
+        in this position is not rejected by GitHub -- it is silently reinterpreted
+        as free text, which is the exact failure the curated list replaced.
+        """
+        return self.planned('github_topics', DEFAULT_GITHUB_TOPICS)
 
     def build_queries(self):
         """
@@ -99,12 +155,26 @@ class GitHubCollector(BaseCollector):
         genuinely active projects; sorting by stars surfaces the ones that matter.
         """
         cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).strftime('%Y-%m-%d')
-        return [
-            f"topic:llm pushed:>={cutoff} stars:>200",
-            f"topic:machine-learning pushed:>={cutoff} stars:>200",
-            f"topic:ai-agents pushed:>={cutoff} stars:>100",
-            f"topic:generative-ai pushed:>={cutoff} stars:>100",
-        ]
+        topics = self.topics()
+
+        # Two tiers, as before -- but the split is now derived from POSITION rather
+        # than written out per topic. Both the curated list and the planner return
+        # their slugs best-first, so the leading third are treated as the core and
+        # held to a high star floor, and the tail widens the pool at a lower floor
+        # so it survives the gatekeeper's rejection rate. Results are merged and
+        # re-sorted by stars, so the wider tier only ever supplies the repositories
+        # needed to top the cycle up to TARGET_POSTS_PER_PLATFORM.
+        core = max(1, len(topics) // 3)
+        queries = []
+        for idx, topic in enumerate(topics):
+            if idx < core:
+                floor = STAR_FLOOR_CORE
+            elif idx < core * 2:
+                floor = STAR_FLOOR_MID
+            else:
+                floor = STAR_FLOOR_WIDE
+            queries.append(f"topic:{topic} pushed:>={cutoff} stars:>{floor}")
+        return queries
 
     async def run_query(self, client, query, per_query):
         """Executes one search query and returns its raw items."""
@@ -114,7 +184,12 @@ class GitHubCollector(BaseCollector):
             if response.status_code != 200:
                 print(f"   ⚠️  GitHub search '{query}' returned {response.status_code}")
                 return []
-            return response.json().get('items', [])
+            payload = response.json()
+            # total_count is exact and free with the page we asked for anyway; it is
+            # the number of active repositories matching this query, before any cap.
+            if isinstance(payload.get('total_count'), int):
+                self.search_totals.append(payload['total_count'])
+            return payload.get('items', [])
         except Exception as e:
             print(f"   ⚠️  GitHub search '{query}' failed: {e}")
             return []
@@ -126,20 +201,32 @@ class GitHubCollector(BaseCollector):
         """
         try:
             repo_name = item['name']
-            description = item.get('description') or ''
+            description = (item.get('description') or '').strip()
 
             # Execute the concurrent deep fetch for the README content, bounded by a
             # semaphore so we never fire one request per repository simultaneously.
-            readme = ""
-            if self.readme_budget > 0:
-                self.readme_budget -= 1
-                async with self.semaphore:
-                    readme = await fetch_readme(client, item['owner']['login'], repo_name)
+            owner = item['owner']['login']
+            async with self.semaphore:
+                # Unmetered CDN first; the core-API quota is spent only on the
+                # repositories the CDN could not resolve.
+                readme = await fetch_readme_raw(
+                    client, owner, repo_name, item.get('default_branch')
+                )
+                if not readme and self.readme_budget > 0:
+                    self.readme_budget -= 1
+                    readme = await fetch_readme(client, owner, repo_name)
 
             # The repo name is deliberately NOT repeated here: the old template
             # ("Project: {name}. Description: ...") made KeyBERT rank name echoes
             # ("project xla", "xla project") above the actual subject matter.
-            content = f"{description}. {readme}".strip()
+            #
+            # The separator is added only when the description does not already end in
+            # terminal punctuation. The old f"{description}. {readme}" appended one
+            # unconditionally, so every README-less repo -- which, with the README budget
+            # exhausted, meant all of them -- was stored ending in a bare "..".
+            if description and description[-1] not in '.!?':
+                description += '.'
+            content = f"{description} {readme}".strip()
 
             post = {
                 'source_platform': self.platform_name,
@@ -174,21 +261,34 @@ class GitHubCollector(BaseCollector):
                 # Always leave GITHUB_RATE_LIMIT_FLOOR in reserve so a cycle cannot
                 # leave the quota at zero for whatever runs next.
                 self.readme_budget = max(0, remaining - GITHUB_RATE_LIMIT_FLOOR)
-                if self.readme_budget < MAX_POSTS_PER_PLATFORM:
-                    print(f"   ⚠️  GitHub core budget {remaining}/hr — fetching at most "
-                          f"{self.readme_budget} READMEs this cycle (rest use descriptions "
-                          f"only). Set GITHUB_TOKEN to raise the limit to 5000/hr.")
+                if self.readme_budget < TARGET_POSTS_PER_PLATFORM:
+                    print(f"   ⚠️  GitHub core budget {remaining}/hr — at most "
+                          f"{self.readme_budget} READMEs may use the API fallback this "
+                          f"cycle. README.md still arrives over the unmetered CDN; only "
+                          f"oddly-named ones are affected. Set GITHUB_TOKEN to raise the "
+                          f"limit to 5000/hr.")
         except Exception:
             self.readme_budget = MAX_POSTS_PER_PLATFORM  # Budget unknown; proceed optimistically
 
     async def collect(self, client: httpx.AsyncClient):
         """Main entry point. Fetches top repositories and dispatches concurrent tasks."""
-        print(f"--- {self.platform_name}: Searching for trending AI repos concurrently... ---")
+        topic_label = getattr(self.topic_profile, 'target_topic', 'AI')
+        print(f"--- {self.platform_name}: Searching for trending '{topic_label}' repos "
+              f"concurrently... ---")
         try:
             await self.check_rate_budget(client)
 
             queries = self.build_queries()
-            per_query = max(10, MAX_POSTS_PER_PLATFORM // len(queries))
+            if not queries:
+                return []
+            # Each query is asked for a full page rather than an even share of the target.
+            # Search pages are one request each regardless of size, so the wide pool is
+            # effectively free, and process_repo() is what actually costs quota -- and it
+            # only runs on as many candidates as the target needs.
+            per_query = min(
+                GITHUB_MAX_PER_PAGE,
+                max(25, MAX_POSTS_PER_PLATFORM // len(queries) * 2),
+            )
 
             search_results = await asyncio.gather(
                 *[self.run_query(client, q, per_query) for q in queries]
@@ -196,23 +296,26 @@ class GitHubCollector(BaseCollector):
 
             # Merge the topic queries, deduplicating repositories that carry several
             # of the topics we search for.
+            self.record_candidates(search_results, 'id')
             unique_items = {}
             for items in search_results:
                 for item in items:
                     unique_items.setdefault(item['id'], item)
 
+            # Best-first, then oversampled: the pool is deliberately larger than the
+            # target so gatekeeper rejections are absorbed by lower-ranked repositories
+            # instead of shrinking the stored count.
             items = sorted(
                 unique_items.values(),
                 key=lambda i: i.get('stargazers_count', 0),
                 reverse=True
             )[:MAX_POSTS_PER_PLATFORM]
 
-            # Concurrency implementation: Dispatch a task to fetch the README for each repo
-            tasks = [self.process_repo(client, item) for item in items]
-            results = await asyncio.gather(*tasks)
-
-            # Filter out invalid or failed repositories
-            return [post for post in results if post is not None]
+            # Walk the pool in concurrent waves, stopping once TARGET_POSTS_PER_PLATFORM
+            # repositories have cleared the quality gate.
+            return await self.collect_until_target(
+                items, lambda item: self.process_repo(client, item)
+            )
 
         except Exception as e:
             print(f"Critical Error in GitHub Collector orchestration: {e}")
