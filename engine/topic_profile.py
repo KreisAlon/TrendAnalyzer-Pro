@@ -30,8 +30,8 @@ _TOPIC_SLUG_RE = re.compile(r'^[a-z0-9][a-z0-9-]{0,34}$')
 # Mastodon / Dev.to tag grammar: no hyphens.
 _TAG_RE = re.compile(r'^[a-z0-9]{2,30}$')
 
-# Keywords become \b...\b patterns, so no regex metacharacters; max 40 chars.
-_KEYWORD_RE = re.compile(r'^[a-z0-9][a-z0-9 .\-]{0,39}$')
+# Keywords become word-bounded patterns (escaped); '+' and '#' keep 'c++' / 'c#'.
+_KEYWORD_RE = re.compile(r'^[a-z0-9][a-z0-9 .+#\-]{0,39}$')
 
 _SEARCH_STOPWORDS = frozenset(
     "a an and or the of for in on to with about into from by vs versus new latest".split()
@@ -79,7 +79,8 @@ def _clean_keywords(values, limit=MAX_KEYWORDS):
     """Sanitises a keyword tier so every term is safe for word-boundary matching."""
     def strip_punct(item):
         # Salvage wrapped terms ('"llm"', '#llm', 'llm,') instead of dropping them.
-        return item.strip('"\'`#,;:()[]{}').strip()
+        # A trailing '#' is kept: it is part of names like 'c#'.
+        return item.strip('"\'`,;:()[]{}').lstrip('#').strip()
 
     return [k for k in _clean_list(values, _KEYWORD_RE, limit, transform=strip_punct)
             if len(k) >= MIN_KEYWORD_CHARS]
@@ -164,17 +165,19 @@ class TopicProfile:
         if not topic or topic.lower() == config.TARGET_TOPIC.strip().lower():
             return cls.default(topic or None)
 
-        # Technology-name-friendly tokens ('c++', 'node.js'), minus filler words.
-        words = [w for w in re.findall(r'[a-z0-9][a-z0-9.+\-]*', topic.lower())
+        # Technology-name-friendly tokens ('c++', 'c#', 'node.js'), minus filler words.
+        words = [w for w in re.findall(r'[a-z0-9][a-z0-9.+#\-]*', topic.lower())
                  if w not in _SEARCH_STOPWORDS]
-        words = [w for w in (t.strip('.-+') for t in words) if len(w) >= MIN_KEYWORD_CHARS]
+        words = [w for w in (t.strip('.-') for t in words) if len(w) >= MIN_KEYWORD_CHARS]
         if not words:
             return cls.empty(topic)
 
         # Three spellings of the phrase, because platforms tag inconsistently:
         # "machine learning", "machine-learning" (GitHub) and "machinelearning" (tags).
         phrase = " ".join(words)
-        alnum = [re.sub(r'[^a-z0-9]', '', w) for w in words]
+        # Tags spell symbols out: 'c++' -> 'cpp', 'c#' -> 'csharp'.
+        alnum = [re.sub(r'[^a-z0-9]', '', w.replace('++', 'pp').replace('#', 'sharp'))
+                 for w in words]
         compact, hyphenated = "".join(alnum), "-".join(alnum)
 
         strong = _clean_keywords([phrase, hyphenated, compact])
@@ -185,11 +188,11 @@ class TopicProfile:
             target_topic=topic,
             strong_keywords=strong,
             weak_keywords=weak,
-            github_topics=_clean_list([hyphenated, compact] + words, _TOPIC_SLUG_RE,
+            github_topics=_clean_list([hyphenated, compact] + alnum, _TOPIC_SLUG_RE,
                                       MAX_QUERIES),
             hn_queries=_clean_free_queries([topic] + (words if len(words) > 1 else [])),
-            devto_tags=_clean_list([compact] + words, _TAG_RE, MAX_TAGS),
-            mastodon_tags=_clean_list([compact] + words, _TAG_RE, MAX_TAGS),
+            devto_tags=_clean_list([compact] + alnum, _TAG_RE, MAX_TAGS),
+            mastodon_tags=_clean_list([compact] + alnum, _TAG_RE, MAX_TAGS),
             source="keywords",
             rationale="Searched directly for the words in your topic.",
         )

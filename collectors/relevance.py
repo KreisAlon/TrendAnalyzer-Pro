@@ -30,11 +30,12 @@ def _build_keyword_pattern(keywords):
     """
     Compiles keywords into one case-insensitive, word-boundary alternation.
 
-    The `\\b` anchors stop short terms ('ai', 'ml') matching inside other words.
+    The anchors stop short terms ('ai', 'ml') matching inside other words. They are
+    lookarounds rather than `\\b`, which never matches after a symbol ('c++', 'c#').
     """
     # Longest-first, so a multi-word phrase wins over its own prefix.
     alternatives = '|'.join(re.escape(k) for k in sorted(keywords, key=len, reverse=True))
-    return re.compile(r'\b(?:' + alternatives + r')\b', re.IGNORECASE)
+    return re.compile(r'(?<!\w)(?:' + alternatives + r')(?!\w)', re.IGNORECASE)
 
 
 # Fallback tiers when no TopicProfile is applied.
