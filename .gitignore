@@ -5,15 +5,17 @@ __pycache__/
 # Virtual Environment
 venv/
 env/
+.venv/
 .env
 
-# Database
+# Runtime data: the SQLite corpus (with its WAL side files) and the per-run search
+# plan written for the dashboard. Generated on every launch; the folder itself is kept.
+data/*
+!data/.gitkeep
 *.db
+*.db-wal
+*.db-shm
 *.sqlite3
-
-# Per-run search plan written by DynamicTopicManager for the dashboard to read.
-# Generated output, and it changes every time the engine is retargeted.
-topic_profile.json
 
 # Mac OS specific
 .DS_Store
@@ -21,3 +23,6 @@ topic_profile.json
 # IDE settings
 .idea/
 .vscode/
+
+# Office lock files
+~$*

@@ -1,16 +1,18 @@
-# TrendScope theme. The accent is slate ink rather than Streamlit's default red,
-# so sliders, toggles, tabs and spinners match the dashboard's monochrome chrome
-# and never compete with the four platform colours in the charts.
+# Streamlit configuration for the TrendAnalyzer Pro dashboard.
+
+# Theme. The accent is a neutral slate ink rather than Streamlit's default red, so
+# interactive controls (tabs, buttons, spinners) stay achromatic and never compete
+# with the four categorical platform colours used in the charts.
 [theme]
-base = "light"
-primaryColor = "#0f172a"
-backgroundColor = "#f6f7fb"
-secondaryBackgroundColor = "#eef1f5"
-textColor = "#0f172a"
-font = "sans-serif"
+base = "light"                        # Light base palette
+primaryColor = "#0f172a"              # Accent for controls: slate ink
+backgroundColor = "#f6f7fb"           # Page surface
+secondaryBackgroundColor = "#eef1f5"  # Surface for inputs and containers
+textColor = "#0f172a"                 # Body text, matches the accent ink
+font = "sans-serif"                   # Base font family
 
 [client]
-toolbarMode = "minimal"
+toolbarMode = "minimal"               # Hide developer-only toolbar options
 
 [browser]
-gatherUsageStats = false
+gatherUsageStats = false              # Disable Streamlit telemetry
