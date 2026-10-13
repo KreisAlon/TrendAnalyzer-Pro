@@ -1,28 +1,8 @@
-# Python caches
 __pycache__/
-*.py[cod]
-
-# Virtual Environment
-venv/
-env/
-.venv/
+*.pyc
 .env
-
-# Runtime data: the SQLite corpus (with its WAL side files) and the per-run search
-# plan written for the dashboard. Generated on every launch; the folder itself is kept.
-data/*
-!data/.gitkeep
-*.db
-*.db-wal
-*.db-shm
-*.sqlite3
-
-# Mac OS specific
+venv/
+.venv/
 .DS_Store
-
-# IDE settings
-.idea/
-.vscode/
-
-# Office lock files
-~$*
+data/*.db
+data/*.db-*

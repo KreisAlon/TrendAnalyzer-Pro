@@ -1,0 +1,24 @@
+{
+  "target_topic": "Agents",
+  "strong_keywords": [
+    "agents"
+  ],
+  "weak_keywords": [
+    "agents"
+  ],
+  "github_topics": [
+    "agents"
+  ],
+  "hn_queries": [
+    "Agents"
+  ],
+  "devto_tags": [
+    "agents"
+  ],
+  "mastodon_tags": [
+    "agents"
+  ],
+  "source": "keywords",
+  "rationale": "Searched directly for the words in your topic.",
+  "generated_at": "2026-10-13T06:43:36.163821+00:00"
+}
