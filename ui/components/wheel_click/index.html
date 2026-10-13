@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>trend_wheel_click</title>
+</head>
+<body style="margin: 0">
+<script>
+// Invisible Streamlit component (ui/views/wheel_tab.py): reports the clicked sunburst
+// node id back to Python. Speaks the component protocol over postMessage (no npm
+// build); the iframe is same-origin, so it can reach the parent page's Plotly chart.
+(function () {
+    function send(type, payload) {
+        window.parent.postMessage(
+            Object.assign({ isStreamlitMessage: true, type: type }, payload), "*");
+    }
+
+    let selector = null;
+    let timer = null;
+
+    // Stored on the parent window, so handlers bound by an earlier mount of this
+    // iframe report through the live component.
+    function report(id) {
+        // The nonce makes a repeat click on the same node a distinct value.
+        send("streamlit:setComponentValue",
+             { value: { clicked: id, nonce: Date.now() + Math.random() }, dataType: "json" });
+    }
+
+    function bind() {
+        let doc;
+        try {
+            doc = window.parent.document;
+        } catch (err) {
+            return;     // Parent page not reachable
+        }
+        const gd = doc.querySelector(selector + " .js-plotly-plot");
+        if (!gd || typeof gd.on !== "function" || gd.__trendWheelBound) return;
+        gd.__trendWheelBound = true;
+        gd.on("plotly_sunburstclick", function (event) {
+            const pt = event && event.points && event.points[0];
+            if (!pt) return;
+            const id = pt.id || (pt.data && pt.data.ids && pt.data.ids[pt.pointNumber]);
+            if (!id) return;
+            doc.defaultView.__trendWheelReport(String(id));
+            // A post is a leaf: select it, don't try to zoom into it.
+            if (String(id).startsWith("post:")) return false;
+        });
+    }
+
+    window.addEventListener("message", function (event) {
+        const msg = event.data;
+        if (!msg || msg.type !== "streamlit:render") return;
+        try {
+            window.parent.__trendWheelReport = report;
+        } catch (err) {
+            return;
+        }
+        selector = (msg.args && msg.args.data && msg.args.data.selector) || "";
+        if (timer === null) {
+            bind();
+            // The chart is re-created on some reruns, so keep rebinding.
+            timer = setInterval(bind, 600);
+        }
+    });
+
+    send("streamlit:componentReady", { apiVersion: 1 });
+    send("streamlit:setFrameHeight", { height: 0 });
+})();
+</script>
+</body>
+</html>
