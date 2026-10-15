@@ -6,3 +6,5 @@ venv/
 .DS_Store
 data/*.db
 data/*.db-*
+.claude/
+evaluation_findings.md
