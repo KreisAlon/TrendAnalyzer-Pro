@@ -8,3 +8,4 @@ data/*.db
 data/*.db-*
 .claude/
 evaluation_findings.md
+data/golden_demo_profile.json
